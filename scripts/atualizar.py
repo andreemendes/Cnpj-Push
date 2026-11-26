@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -89,20 +90,33 @@ class PastaLocal:
         return self.pasta / nome  # já está no disco
 
 
-def linhas_zip(caminho):
-    """Lê o CSV de dentro do zip da Receita (separador ;, latin-1, aspas)."""
+def linhas_zip(caminho, filtro=None):
+    """Lê o CSV de dentro do zip da Receita (separador ;, latin-1, aspas).
+    `filtro` recebe a linha crua e descarta na hora o que não interessa (bem mais rápido)."""
     with zipfile.ZipFile(caminho) as z:
         for membro in z.namelist():
             with z.open(membro) as bruto:
-                texto = io.TextIOWrapper(bruto, encoding="latin-1", newline="")
-                yield from csv.reader(texto, delimiter=";", quotechar='"')
+                for crua in io.TextIOWrapper(bruto, encoding="latin-1", newline=""):
+                    if filtro and not filtro(crua):
+                        continue
+                    yield next(csv.reader([crua], delimiter=";", quotechar='"'))
 
 
-def processar(fonte, mes, nomes, pasta_tmp, apagar, func):
+class Downloads:
+    """Baixa vários arquivos ao mesmo tempo (o servidor da Receita é lento por conexão)."""
+    def __init__(self, fonte, mes, nomes, pasta, simultaneos=4):
+        self.pool = ThreadPoolExecutor(max_workers=simultaneos)
+        self.fut = {n: self.pool.submit(fonte.baixar, mes, n, pasta) for n in nomes}
+
+    def caminho(self, nome):
+        return self.fut[nome].result()
+
+
+def processar(downloads, nomes, apagar, func, filtro=None):
     for nome in nomes:
-        caminho = fonte.baixar(mes, nome, pasta_tmp)
+        caminho = downloads.caminho(nome)
         log(f"  lendo {nome}...")
-        for linha in linhas_zip(caminho):
+        for linha in linhas_zip(caminho, filtro):
             func(linha)
         if apagar:
             Path(caminho).unlink(missing_ok=True)
@@ -175,6 +189,7 @@ def main():
     pasta_tmp = tempfile.mkdtemp(prefix="cnpj_")
     apagar = isinstance(fonte, Receita)
     hoje = dt.date.today()
+    downloads = Downloads(fonte, mes, estab + empresas + simples + cnaes, pasta_tmp)
 
     # 1) estabelecimentos ativos do estado, abertos nos últimos DIAS_DETECCAO dias
     log(f"[1/4] Estabelecimentos de {uf}...")
@@ -188,7 +203,8 @@ def main():
         if not d or d < limite_antigo or d > hoje:
             return
         brutos.append((l, d))
-    processar(fonte, mes, estab, pasta_tmp, apagar, pega_estab)
+    marca_uf = f';"{uf}";'
+    processar(downloads, estab, apagar, pega_estab, lambda c: marca_uf in c)
     if not brutos:
         sys.exit(f"Nenhum estabelecimento ativo encontrado para {uf}.")
     ref = max(d for _, d in brutos)              # data mais recente presente nos dados
@@ -206,7 +222,8 @@ def main():
     def pega_emp(l):
         if l and l[0] in basicos:
             info_emp[l[0]] = (limpar(l[1]), l[5] if len(l) > 5 else "")
-    processar(fonte, mes, empresas, pasta_tmp, apagar, pega_emp)
+    so_basicos = lambda c: c.lstrip('"')[:8] in basicos
+    processar(downloads, empresas, apagar, pega_emp, so_basicos)
 
     log("[3/4] Simples/MEI...")
     mei = set()
@@ -214,13 +231,14 @@ def main():
     def pega_simples(l):
         if len(l) > 4 and l[0] in basicos and l[4] == "S" and not (l[6] if len(l) > 6 else "").strip("0 "):
             mei.add(l[0])
-    processar(fonte, mes, simples, pasta_tmp, apagar, pega_simples)
+    processar(downloads, simples, apagar, pega_simples, so_basicos)
 
     desc_cnae = {}
     for nome in cnaes:
-        for l in linhas_zip(fonte.baixar(mes, nome, pasta_tmp)):
+        for l in linhas_zip(downloads.caminho(nome)):
             if len(l) >= 2:
                 desc_cnae[l[0]] = limpar(l[1])
+    downloads.pool.shutdown()
     shutil.rmtree(pasta_tmp, ignore_errors=True)
 
     # 4) monta o mapa e descobre os novos
