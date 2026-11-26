@@ -2,7 +2,7 @@
   "uf": "SC",
   "dias_no_mapa": 60,
   "notificacoes_por_dia": 10,
-  "site_url": "https://SEU-USUARIO.github.io/cnpj-sc/",
+  "site_url": "https://github.com/andreemendes/Cnpj-Push",
   "receita_share_token": "gn672Ad4CF8N6TK",
   "receita_webdav": "https://arquivos.receitafederal.gov.br/public.php/webdav/Dados/Cadastros/CNPJ"
 }
